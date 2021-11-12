@@ -46,6 +46,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "debug.h"
 #include "timer.h"
 #include "wait.h"
+#include "ringbuf.h"
 
 
 #define WAIT(stat, us, err) do { \
@@ -60,15 +61,11 @@ volatile uint16_t ibmpc_isr_debug = 0;
 volatile uint8_t ibmpc_protocol = IBMPC_PROTOCOL_NO;
 volatile uint8_t ibmpc_error = IBMPC_ERR_NONE;
 
-/* 2-byte buffer for data received from keyboard
- * buffer states:
- *      FFFF: empty
- *      FFss: one data
- *      sstt: two data
- *      eeFF: error
- * where ss, tt and ee are 0x00-0xFE. 0xFF means empty or no data in buffer.
- */
-static volatile uint16_t recv_data = 0xFFFF;
+/* buffer for data received from device */
+#define RINGBUF_SIZE    16
+static uint8_t rbuf[RINGBUF_SIZE];
+static ringbuf_t rb = {};
+
 /* internal state of receiving data */
 static volatile uint16_t isr_state = 0x8000;
 static uint8_t timer_start = 0;
@@ -80,6 +77,7 @@ void ibmpc_host_init(void)
     inhibit();
     IBMPC_INT_INIT();
     IBMPC_INT_OFF();
+    ringbuf_init(&rb, rbuf, RINGBUF_SIZE);
 }
 
 void ibmpc_host_enable(void)
@@ -98,18 +96,30 @@ int16_t ibmpc_host_send(uint8_t data)
 {
     bool parity = true;
     ibmpc_error = IBMPC_ERR_NONE;
+    uint8_t retry = 0;
 
     dprintf("w%02X ", data);
 
+    // Not receiving data
+    if (isr_state != 0x8000) dprintf("isr:%04X ", isr_state);
+    while (isr_state != 0x8000) ;
+
+    // Not clock Lo
+    if (!clock_in()) dprintf("c:%u ", wait_clock_hi(1000));
+
+    // Not data Lo
+    if (!data_in()) dprintf("d:%u ", wait_data_hi(1000));
+
     IBMPC_INT_OFF();
 
+RETRY:
     /* terminate a transmission if we have */
     inhibit();
-    wait_us(100);    // [5]p.54
+    wait_us(200);    // [5]p.54
 
     /* 'Request to Send' and Start bit */
     data_lo();
-    wait_us(100);
+    wait_us(200);
     clock_hi();     // [5]p.54 [clock low]>100us [5]p.50
     WAIT(clock_lo, 10000, 1);   // [5]p.53, -10ms [5]p.50
 
@@ -135,25 +145,29 @@ int16_t ibmpc_host_send(uint8_t data)
     /* Stop bit */
     wait_us(15);
     data_hi();
-    WAIT(clock_hi, 50, 6);
-    WAIT(clock_lo, 50, 7);
 
     /* Ack */
-    WAIT(data_lo, 50, 8);
-
-    /* wait for idle state */
-    WAIT(clock_hi, 50, 9);
-    WAIT(data_hi, 50, 10);
+    WAIT(data_lo, 300, 6);
+    WAIT(data_hi, 300, 7);
+    WAIT(clock_hi, 300, 8);
 
     // clear buffer to get response correctly
-    recv_data = 0xFFFF;
     ibmpc_host_isr_clear();
 
     idle();
     IBMPC_INT_ON();
     return ibmpc_host_recv_response();
 ERROR:
+    // Retry for Z-150 AT start bit error
+    if (ibmpc_error == 1 && retry++ < 10) {
+        ibmpc_error = IBMPC_ERR_NONE;
+        dprintf("R ");
+        goto RETRY;
+    }
+
     ibmpc_error |= IBMPC_ERR_SEND;
+    inhibit();
+    wait_ms(2);
     idle();
     IBMPC_INT_ON();
     return -1;
@@ -164,54 +178,19 @@ ERROR:
  */
 int16_t ibmpc_host_recv(void)
 {
-    uint16_t data = 0;
-    uint8_t ret = 0xFF;
+    int16_t ret = -1;
+
+    // Enable ISR if buffer was full
+    if (ringbuf_is_full(&rb)) {
+        ibmpc_host_isr_clear();
+        IBMPC_INT_ON();
+        idle();
+    }
 
     ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
-        data = recv_data;
-
-        // remove data from buffer:
-        // FFFF(empty)      -> FFFF
-        // FFss(one data)   -> FFFF
-        // sstt(two data)   -> FFtt
-        // eeFF(errror)     -> FFFF
-        recv_data = data | (((data&0xFF00) == 0xFF00) ? 0x00FF : 0xFF00);
+        ret = ringbuf_get(&rb);
     }
-
-    if ((data&0x00FF) == 0x00FF) {
-        // error: eeFF
-        switch (data>>8) {
-            case IBMPC_ERR_FF:
-                // 0xFF(Overrun/Error) from keyboard
-                dprintf("!FF! ");
-                ret = 0xFF;
-                break;
-            case IBMPC_ERR_FULL:
-                // buffer full
-                dprintf("!FULL! ");
-                ret = 0xFF;
-                break;
-            case 0xFF:
-                // empty: FFFF
-                return -1;
-            default:
-                // other errors
-                dprintf("e%02X ", data>>8);
-                return -1;
-        }
-    } else {
-        if ((data | 0x00FF) != 0xFFFF) {
-            // two data: sstt
-            dprintf("b:%04X ", data);
-            ret = (data>>8);
-        } else {
-            // one data: FFss
-            ret = (data&0x00FF);
-        }
-    }
-
-    //dprintf("i%04X ", ibmpc_isr_debug); ibmpc_isr_debug = 0;
-    dprintf("r%02X ", ret);
+    if (ret != -1) dprintf("r%02X ", ret&0xFF);
     return ret;
 }
 
@@ -232,14 +211,13 @@ void ibmpc_host_isr_clear(void)
     ibmpc_protocol = 0;
     ibmpc_error = 0;
     isr_state = 0x8000;
-    recv_data = 0xFFFF;
+    ringbuf_reset(&rb);
 }
 
-#define LO8(w)  (*((uint8_t *)&(w)))
-#define HI8(w)  (*(((uint8_t *)&(w))+1))
-// NOTE: With this ISR data line can be read within 2us after clock falling edge.
-// To read data line early as possible:
-// write naked ISR with asembly code to read the line and call C func to do other job?
+
+// NOTE: With this ISR data line should be read within 5us after clock falling edge.
+// Confirmed that ATmega32u4 can read data line in 2.5us from interrupt after
+// ISR prologue pushs r18, r19, r20, r21, r24, r25 r30 and r31 with GCC 5.4.0
 ISR(IBMPC_INT_VECT)
 {
     uint8_t dbit;
@@ -253,8 +231,8 @@ ISR(IBMPC_INT_VECT)
     if (isr_state == 0x8000) {
         timer_start = t;
     } else {
-        // should not take more than 1ms
-        if (timer_start != t && (uint8_t)(timer_start + 1) != t) {
+        // This gives 2.0ms at least before timeout
+        if ((uint8_t)(t - timer_start) >= 3) {
             ibmpc_isr_debug = isr_state;
             ibmpc_error = IBMPC_ERR_TIMEOUT;
             goto ERROR;
@@ -385,25 +363,22 @@ ISR(IBMPC_INT_VECT)
             break;
     }
 
-ERROR:
-    // error: eeFF
-    recv_data = (ibmpc_error<<8) | 0x00FF;
-    goto CLEAR;
 DONE:
-    if ((isr_state & 0x00FF) == 0x00FF) {
-        // receive error code 0xFF
-        ibmpc_error = IBMPC_ERR_FF;
-        goto ERROR;
-    }
-    if (HI8(recv_data) != 0xFF && LO8(recv_data) != 0xFF) {
-        // buffer full
-        ibmpc_error = IBMPC_ERR_FULL;
-        goto ERROR;
-    }
     // store data
-    recv_data = recv_data<<8;
-    recv_data |= isr_state & 0xFF;
-CLEAR:
+    ringbuf_push(&rb, isr_state & 0xFF);
+    if (ringbuf_is_full(&rb)) {
+        // just became full
+        // Disable ISR if buffer is full
+        IBMPC_INT_OFF();
+        // inhibit: clock_lo
+        IBMPC_CLOCK_PORT &= ~(1<<IBMPC_CLOCK_BIT);
+        IBMPC_CLOCK_DDR  |=  (1<<IBMPC_CLOCK_BIT);
+    }
+    if (ringbuf_is_empty(&rb)) {
+        // buffer overflow
+        ibmpc_error = IBMPC_ERR_FULL;
+    }
+ERROR:
     // clear for next data
     isr_state = 0x8000;
 NEXT:

@@ -22,7 +22,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 static inline void add_key_byte(uint8_t code);
 static inline void del_key_byte(uint8_t code);
-#ifdef NKRO_ENABLE
+#if defined(NKRO_ENABLE) || defined(NKRO_6KRO_ENABLE)
 static inline void add_key_bit(uint8_t code);
 static inline void del_key_bit(uint8_t code);
 #endif
@@ -80,7 +80,7 @@ void send_keyboard_report(void) {
 /* key */
 void add_key(uint8_t key)
 {
-#ifdef NKRO_ENABLE
+#if defined(NKRO_ENABLE) || defined(NKRO_6KRO_ENABLE)
     if (keyboard_protocol && keyboard_nkro) {
         add_key_bit(key);
         return;
@@ -91,7 +91,7 @@ void add_key(uint8_t key)
 
 void del_key(uint8_t key)
 {
-#ifdef NKRO_ENABLE
+#if defined(NKRO_ENABLE) || defined(NKRO_6KRO_ENABLE)
     if (keyboard_protocol && keyboard_nkro) {
         del_key_bit(key);
         return;
@@ -164,7 +164,7 @@ uint8_t has_anymod(void)
 
 uint8_t get_first_key(void)
 {
-#ifdef NKRO_ENABLE
+#if defined(NKRO_ENABLE) || defined(NKRO_6KRO_ENABLE)
     if (keyboard_protocol && keyboard_nkro) {
         uint8_t i = 0;
         for (; i < KEYBOARD_REPORT_BITS && !keyboard_report->nkro.bits[i]; i++)
@@ -291,7 +291,7 @@ static inline void del_key_byte(uint8_t code)
 #endif
 }
 
-#ifdef NKRO_ENABLE
+#if defined(NKRO_ENABLE) || defined(NKRO_6KRO_ENABLE)
 static inline void add_key_bit(uint8_t code)
 {
     if ((code>>3) < KEYBOARD_REPORT_BITS) {
