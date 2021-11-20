@@ -22,6 +22,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <stdbool.h>
 #include "action.h"
 
+#ifdef CONFIG_H_FILE
+    #include CONFIG_H_FILE
+#endif
 
 #ifdef __cplusplus
 extern "C" {
