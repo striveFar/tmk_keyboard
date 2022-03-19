@@ -55,6 +55,9 @@ void layer_xor(uint32_t state);
 #endif
 
 
+/* return the topmost non-transparent layer currently associated with key */
+uint8_t current_layer_for_key(keypos_t key);
+
 /* return action depending on current layer status */
 action_t layer_switch_get_action(keyevent_t key);
 

@@ -123,7 +123,7 @@ void layer_debug(void)
 
 
 /* return layer effective for key at this time */
-static uint8_t current_layer_for_key(keypos_t key)
+uint8_t current_layer_for_key(keypos_t key)
 {
 #ifndef NO_ACTION_LAYER
     action_t action = ACTION_TRANSPARENT;
